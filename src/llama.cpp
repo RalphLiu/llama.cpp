@@ -5228,6 +5228,8 @@ static std::string llama_model_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0_4_4: return "Q4_0_4_4";
         case LLAMA_FTYPE_MOSTLY_Q4_0_4_8: return "Q4_0_4_8";
         case LLAMA_FTYPE_MOSTLY_Q4_0_8_8: return "Q4_0_8_8";
+        // Custom quantization scheme
+        case LLAMA_FTYPE_CUSTOM:        return "CUSTOM";
 
         default: return "unknown, may not work";
     }
@@ -18589,11 +18591,31 @@ static size_t llama_tensor_quantize_internal(enum ggml_type new_type, const floa
     return new_size;
 }
 
+static bool match_string(const std::string& str, const std::string& pattern, uint32_t string_index = 0, uint32_t pattern_index = 0) {
+    // if both index pointers reach the end of str and pattern respectively
+    if (string_index == str.size() && pattern_index == pattern.size()) {
+        return true;
+    }
+    // if pattern character is '*', it can match with any sequence of characters.
+    if (pattern_index < pattern.size() && pattern[pattern_index] == '*') {
+        // move pattern index by 1 and match rest, or keep string index same and move pattern index
+        return match_string(str, pattern, string_index, pattern_index + 1) || (string_index < str.size() && match_string(str, pattern, string_index + 1, pattern_index));
+    }
+    // if current characters match or pattern character is '?'
+    if (string_index < str.size() && pattern_index < pattern.size() && (str[string_index] == pattern[pattern_index] || pattern[pattern_index] == '?')) {
+        return match_string(str, pattern, string_index + 1, pattern_index + 1);
+    }
+    return false;
+}
+
 static void llama_model_quantize_internal(const std::string & fname_inp, const std::string & fname_out, const llama_model_quantize_params * params) {
     ggml_type default_type;
-    llama_ftype ftype = params->ftype;
+    llama_ftype ftype =
+        params->override_ftype
+        ? params->override_ftype->default_ftype
+        : params->ftype;
 
-    switch (params->ftype) {
+    switch (ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0: default_type = GGML_TYPE_Q4_0; break;
         case LLAMA_FTYPE_MOSTLY_Q4_1: default_type = GGML_TYPE_Q4_1; break;
         case LLAMA_FTYPE_MOSTLY_Q5_0: default_type = GGML_TYPE_Q5_0; break;
@@ -18689,8 +18711,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
     // copy the KV pairs from the input file
     gguf_set_kv     (ctx_out.get(), ml.meta.get());
     gguf_set_val_u32(ctx_out.get(), "general.quantization_version", GGML_QNT_VERSION); // TODO: use LLM_KV
-    gguf_set_val_u32(ctx_out.get(), "general.file_type", ftype); // TODO: use LLM_KV
-
+    // gguf_set_val_u32(ctx_out.get(), "general.file_type", ftype); // TODO: use LLM_KV
+    gguf_set_val_u32(ctx_out.get(), "general.file_type", params->ftype);
+    
     // Remove split metadata
     gguf_remove_key(ctx_out.get(), ml.llm_kv(LLM_KV_SPLIT_NO).c_str());
     gguf_remove_key(ctx_out.get(), ml.llm_kv(LLM_KV_SPLIT_COUNT).c_str());
@@ -18906,6 +18929,17 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             }
             if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                 new_type = params->output_tensor_type;
+            }
+            // look up tensor name in type override map, if not found use default
+            // type as determined by the ftype.
+            if (params->override_ftype) {
+                for (uint32_t i = 0; i < params->override_ftype->count; ++i) {
+                    if (match_string(tensor->name, params->override_ftype->names[i])) {
+                        // printf("\n -----> %s, %s\n", params->override_ftype->names[i], tensor->name);
+                        new_type = params->override_ftype->types[i];
+                        break;
+                    }
+                }
             }
 
             // If we've decided to quantize to the same type the tensor is already
@@ -19308,6 +19342,7 @@ struct llama_model_quantize_params llama_model_quantize_default_params() {
         /*.keep_split                  =*/ false,
         /*.imatrix                     =*/ nullptr,
         /*.kv_overrides                =*/ nullptr,
+        /*.override_ftype              =*/ nullptr,
     };
 
     return result;

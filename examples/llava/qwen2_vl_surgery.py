@@ -74,7 +74,7 @@ def find_vision_tensors(qwen2vl, dtype) -> Dict[str, np.ndarray]:
             tensor_map[new_name] = ten.astype(np.float32)
         else:
             tensor_map[new_name] = ten.astype(dtype)
-    tensor_map["v.position_embd.weight"] = np.zeros([10, 10], dtype=np.float32)  # dummy tensor, just here as a placeholder
+    tensor_map["v.position_embd.weight"] = np.zeros([32, 10], dtype=np.float32)  # dummy tensor, just here as a placeholder
     return tensor_map
 
 

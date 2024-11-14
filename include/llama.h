@@ -178,6 +178,7 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q4_0_8_8      = 35, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ1_0         = 36, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ2_0         = 37, // except 1d tensors
+        LLAMA_FTYPE_CUSTOM               = 38, // except 1d tensors
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };
@@ -348,7 +349,14 @@ extern "C" {
         ggml_abort_callback abort_callback;
         void *              abort_callback_data;
     };
-
+    
+    typedef struct llama_model_quantize_ftype_override {
+        enum llama_ftype default_ftype; // default type if not overriden
+        uint32_t count;                 // number of overrides
+        const char** names;            // tensor names
+        enum ggml_type* types;         // tensor type override
+    } llama_model_quantize_custom_ftype;
+    
     // model quantization parameters
     typedef struct llama_model_quantize_params {
         int32_t nthread;                     // number of threads to use for quantizing, if <=0 will use std::thread::hardware_concurrency()
@@ -362,6 +370,7 @@ extern "C" {
         bool keep_split;                     // quantize to the same number of shards
         void * imatrix;                      // pointer to importance matrix data
         void * kv_overrides;                 // pointer to vector containing overrides
+        struct llama_model_quantize_ftype_override* override_ftype; // custom quantization scheme
     } llama_model_quantize_params;
 
     typedef struct llama_logit_bias {

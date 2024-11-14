@@ -23,8 +23,10 @@ static bool qwen2vl_eval_image_embed(llama_context * ctx_llama, const struct lla
     const int patch_size = 14 * 2;
     const int ph = image_size->height / patch_size + (image_size->height % patch_size > 0);
     const int pw = image_size->width / patch_size + (image_size->width % patch_size > 0);
-    auto img_tokens = image_embed->n_image_pos;
-    llama_pos mrope_pos[img_tokens * 4];
+    const int img_tokens = image_embed->n_image_pos;
+    std::vector<llama_pos> mrope_pos;
+    mrope_pos.resize(img_tokens * 4);
+    // llama_pos mrope_pos[img_tokens * 4];
     
     for (size_t y = 0; y < ph; y++)
     {
@@ -221,7 +223,7 @@ static struct llava_image_embed * load_image(llava_context * ctx_llava, common_p
     return embed;
 }
 
-static void process_prompt(struct llava_context * ctx_llava, struct llava_image_embed * image_embed, common_params * params, const std::string & prompt) {
+static std::string process_prompt(struct llava_context * ctx_llava, struct llava_image_embed * image_embed, common_params * params, const std::string & prompt) {    
     int n_past = 0;
     int cur_pos_id = 0;
 
@@ -292,6 +294,7 @@ static void process_prompt(struct llava_context * ctx_llava, struct llava_image_
 
     common_sampler_free(smpl);
     LOG("\n");
+    return response;
 }
 
 static struct llama_model * llava_init(common_params * params) {
@@ -348,172 +351,99 @@ static void llava_free(struct llava_context * ctx_llava) {
     llama_backend_free();
 }
 
-#ifndef NDEBUG
-
-static void tmp_test_rope(struct llava_context * ctx_llava, common_params * params) {
-    
-    int n_threads = 1;
-    static size_t buf_size = 512u*1024*1024;
-    static void * buf = malloc(buf_size);
-
-    struct ggml_init_params init_params = {
-        /*.mem_size   =*/ buf_size,
-        /*.mem_buffer =*/ buf,
-        /*.no_alloc   =*/ false,
-    };
-
-    struct ggml_context * ctx0 = ggml_init(init_params);
-    struct ggml_cgraph * gf = ggml_new_graph(ctx0);
-
-    struct ggml_tensor * inp_raw = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 128, 12, 30);
-    ggml_set_name(inp_raw, "inp_raw");
-    ggml_set_input(inp_raw);
-
-    std::vector<float> dummy_q;
-    dummy_q.resize(128 * 12 * 30);
-    std::fill(dummy_q.begin(), dummy_q.end(), 0.1);
-    memcpy(inp_raw->data, dummy_q.data(), 128 * 12 * 30 * ggml_element_size(inp_raw));
-
-    struct ggml_tensor * pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 30);
-    ggml_set_name(pos, "pos");
-    ggml_set_input(pos);
-
-    std::vector<int> pos_id;
-    pos_id.resize(30);
-    for (int i = 0; i < 30; i ++) pos_id[i] = i;
-    memcpy(pos->data, pos_id.data(), (30) * ggml_element_size(pos));
-
-    auto encode = ggml_rope_ext(
-        ctx0, inp_raw, pos, nullptr,
-        128, LLAMA_ROPE_TYPE_NEOX, 32768, 1000000, 1,
-        0, 1, 32, 1);
-    
-    ggml_build_forward_expand(gf, encode);
-    ggml_graph_compute_with_ctx(ctx0, gf, n_threads);
-
-    std::vector<float> embd;
-    embd.resize(128 * 12 * 30);
-    memcpy(
-        embd.data(), 
-        (float *) ggml_get_data(encode), 
-        sizeof(float) * 128 * 12 * 30);
-    ggml_free(ctx0);
-
-
-    // Open a binary file for writing
-    std::ofstream outFile("rope.bin", std::ios::binary);
-    // Check if file is open
-    if (outFile.is_open()) {
-        // Write the vector to the file
-        outFile.write(reinterpret_cast<const char*>(embd.data()), embd.size() * sizeof(int));
-
-        // Close the file
-        outFile.close();
-        std::cout << "Data successfully written to output.bin" << std::endl;
-    } else {
-        std::cerr << "Error opening file!" << std::endl;
-    }
-}
-
-static void tmp_dump_img_embed(struct llava_context * ctx_llava, common_params * params) {
-    // auto * image_embed = load_image(ctx_llava, params, "/home/ron/Downloads/gguf/dog.jpeg");
-    int n_embd  = llama_n_embd(llama_get_model(ctx_llava->ctx_llama));
-    // int ne = n_embd * image_embed->n_image_pos;
-    int ne = n_embd * 4;
-    float vals[56 * 56 * 3];
-    float embd[ne];
-    // for (int i = 0; i < 3*56*56; i++)
-    // {
-    //     vals[i] = 0.1;
-    // }
-    for (int i = 0; i < 56*56; i++)
-    {
-        for (int c = 0; c < 3; c++)
-            vals[i * 3 + c] = (float)(i % (56 * 56)) / (56*56);
-    }
-    
-    // auto param = &ctx_llava->ctx_clip->vision_model.hparams;
-    tmp_clip_image_encode(ctx_llava->ctx_clip, 16, vals, 56, 56, embd);
-
-    std::ofstream outFile("img_embed.bin", std::ios::binary);
-    if (outFile.is_open()) {
-        outFile.write(reinterpret_cast<const char*>(embd), ne * sizeof(float));
-
-        outFile.close();
-        std::cout << "Data successfully written to mrope.bin" << std::endl;
-    } else {
-        std::cerr << "Error opening file!" << std::endl;
-    }
-}
-
-#endif
-
-
-int main(int argc, char ** argv) {
-    ggml_time_init();
-
+class LargeModel
+{
+private:
+    struct llava_context *ctx_llava;
+    llava_image_embed *image_embed;
+public:
+    LargeModel();
+    ~LargeModel();
+    int Precompile(int argc, char ** argv);
+    int Init(const std::string &system_prompt);
+    int Prefill(const std::string &image);
+    std::string Decode();
+    int ResetContext();
+    int Release();
     common_params params;
-
-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_LLAVA, print_usage)) {
+    struct llama_model *model;
+};
+LargeModel::LargeModel()
+{
+    ggml_time_init();
+}
+int LargeModel::Precompile(int argc, char ** argv)
+{
+    if (!common_params_parse(argc, argv, this->params, LLAMA_EXAMPLE_LLAVA, print_usage)) {
         return 1;
-    }
-
-    common_init();
-
-    if (params.mmproj.empty() || (params.image.empty() && !prompt_contains_image(params.prompt))) {
+    }    
+    if (this->params.mmproj.empty() || (this->params.image.empty() && !prompt_contains_image(this->params.prompt))) {
         print_usage(argc, argv);
         return 1;
     }
-
-    auto * model = llava_init(&params);
+    common_init();
+    return 0;
+}
+int LargeModel::Init(const std::string &system_prompt)
+{
+    model = llava_init(&this->params);
     if (model == NULL) {
         fprintf(stderr, "%s: error: failed to init llava model\n", __func__);
         return 1;
     }
+    return 0;
+}
+int LargeModel::Prefill(const std::string &image)
+{
+    ctx_llava = llava_init_context(&this->params, model);
+        image_embed = load_image(ctx_llava, &this->params, image);
+    if (!image_embed) {
+        LOG_ERR("%s: failed to load image %s. Terminating\n\n", __func__, image.c_str());
+        return 1;
+    }    
+    return 0;
+}
 
-    if (prompt_contains_image(params.prompt)) {
-        auto * ctx_llava = llava_init_context(&params, model);
+std::string LargeModel::Decode()
+{
+    std::string res = process_prompt(ctx_llava, image_embed, &this->params, this->params.prompt);
+    llama_perf_context_print(ctx_llava->ctx_llama);
+    return res;
+}
+int LargeModel::ResetContext()
+{
+    llava_free(this->ctx_llava);
+    llava_image_embed_free(this->image_embed);
+    return 0;
+}
 
-        auto * image_embed = load_image(ctx_llava, &params, "");
-
-        // process the prompt
-        process_prompt(ctx_llava, image_embed, &params, params.prompt);
-
-        llama_perf_context_print(ctx_llava->ctx_llama);
-        llava_image_embed_free(image_embed);
-        ctx_llava->model = NULL;
-        llava_free(ctx_llava);
-#ifndef NDEBUG
-    } else if (params.image[0].empty()) {
-        auto ctx_llava = llava_init_context(&params, model);
-        
-        tmp_dump_img_embed(ctx_llava, &params);
-
-        llama_perf_context_print(ctx_llava->ctx_llama);
-        ctx_llava->model = NULL;
-        llava_free(ctx_llava);
-#endif
+int LargeModel::Release()
+{
+    llama_free_model(model);
+    return 0;
+}
+LargeModel::~LargeModel()
+{
+    model= NULL;
+    ctx_llava = NULL;
+    image_embed = NULL;
+}
+int main(int argc, char ** argv) {
+    LargeModel llm;
+    llm.Precompile(argc, argv);
+    llm.Init("");
+    
+    if(prompt_contains_image(llm.params.prompt)) {
+        llm.Prefill("");
+        llm.Decode();
+        llm.ResetContext();
     } else {
-        for (auto & image : params.image) {
-            auto * ctx_llava = llava_init_context(&params, model);
-
-            auto * image_embed = load_image(ctx_llava, &params, image);
-            if (!image_embed) {
-                LOG_ERR("%s: failed to load image %s. Terminating\n\n", __func__, image.c_str());
-                return 1;
-            }
-
-            // process the prompt
-            process_prompt(ctx_llava, image_embed, &params, params.prompt);
-
-            llama_perf_context_print(ctx_llava->ctx_llama);
-            llava_image_embed_free(image_embed);
-            ctx_llava->model = NULL;
-            llava_free(ctx_llava);
+        for (auto & image : llm.params.image) {
+            llm.Prefill(image);
+            llm.Decode();
+            llm.ResetContext();
         }
     }
-
-    llama_free_model(model);
-
+    llm.Release();
     return 0;
 }
